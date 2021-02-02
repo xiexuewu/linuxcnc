@@ -1,0 +1,122 @@
+component sendkeys "send input events based on keycodes from HAL";
+description """This component is intended as a partner component to
+matrix_kb or the hostmot2 7i73 driver. It accepts the key-up and
+key-down event codes from either of these and converts them to keystokes
+sent from a virtual keyboard. The accepted codes cam be seen in the
+extract from the linux headers here: http://wiki.linuxcnc.org/cgi-bin/wiki.pl?Scancodes
+
+It is possible to link the 7i73 codes to both the matrix_kb comp and
+this comp, so that some codes operate HAL pins and some send keystrokes.
+Where the option exists it is MUCH better to use HAL pins for things
+like jogging and machine control. This component should really be used
+only for text entry and GUI operations.
+
+Each key on the matrix is allocated a scan code. The simplest way to
+configure the component is to load it and open a halmeter showing
+sendkeys.0.current-event. Note the code for each physical key.
+(If keys do not give consistent results then you probably need to toggle
+the value of the matrix_kb.0.negative-logic pin).
+Then edit the HAL file to assign a key event to each scancode:
+.br
+bsetp sendkeys.0.event-21 34
+.br
+for example, to set a button to type the letter "G"
+The key events related to each physical key need to be set up prior to
+the component activating. There is an init pin to achieve this, which
+should be set to true in the HAL file once all the events for each key
+have been set up.
+
+To generate keystrokes from other sources note that a keydown is simply
+0xC0 & keycode and keyup is 0x80 & keycode.
+
+Sendkeys can support up to 64 keys.""";
+
+option userspace;
+option extra_cleanup yes;
+include <linux/uinput.h>;
+include <unistd.h>;
+include <fcntl.h>;
+
+variable int sz;
+pin in unsigned keycode_ "Connect to scancode generator";
+pin in unsigned event-##[64] """Event associated with each scancode.
+For example use ""setp sendkeys.0.event-21 60"" to send an F2 keystroke
+when the hardware key that produces code 21 is pressed""";
+pin out signed current-event """Displays the base scancode (without key-up
+and key-down bits) to aid in determining which event pin to program for
+each key""";
+
+pin in bit init "set this pin TRUE once all the events have been set";
+
+license "GPL-2.0+";
+
+;;
+
+int fd;
+
+void emit(int fd, int type, int code, int val)
+{
+   struct input_event ie;
+
+   ie.type = type;
+   ie.code = code;
+   ie.value = val;
+
+   write(fd, &ie, sizeof(ie));
+}
+
+void user_mainloop(void) {
+    struct uinput_user_dev uidev;
+    static int oldcode;
+    static int inited = 0;
+
+    while (1) {
+        FOR_ALL_INSTS(){
+            if ((keycode_ & 0xC0) == 0x80){
+                current_event = (keycode_ & 0x3f);
+            } else {
+                current_event = -1;
+            }
+            if (! init) continue;
+            if (init && ! inited) {
+                fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+                ioctl(fd, UI_SET_EVBIT, EV_KEY);
+                for (int i = 0; i < 64; i++){
+                    if (event(i) > 0 && event(i) < KEY_MAX){
+                        ioctl(fd, UI_SET_KEYBIT, event(i));
+                        rtapi_print_msg(RTAPI_MSG_INFO, "SET_EVBIT %i\n", event(i));
+                    }
+                }
+                memset(&uidev, 0, sizeof(uidev));
+                strcpy(uidev.name, "linuxcnc-hal");
+                uidev.id.bustype = BUS_USB;
+                uidev.id.vendor  = 0x1;
+                uidev.id.product = 0x1;
+                uidev.id.version = 1;
+
+                write(fd, &uidev, sizeof(uidev));
+                ioctl(fd, UI_DEV_CREATE);
+                inited = 1;
+            }
+            if (keycode_ != oldcode) {
+                /* Key press, report the event, send key release, and report again */
+                if ((keycode_ & 0x3F) > 64) continue;
+                if (event(keycode_ & 0x3F) == 0) continue;
+                if ((keycode_ & 0xC0) == 0xC0){ // keydown
+                    emit(fd, EV_KEY, event(keycode_ & 0x3F), 1);
+                    emit(fd, EV_SYN, SYN_REPORT, 0);
+                } else if ((keycode_ & 0xC0) == 0x80){ // keyup
+                    emit(fd, EV_KEY, event(keycode_ & 0x3F), 0);
+                    emit(fd, EV_SYN, SYN_REPORT, 0);
+                }
+                oldcode = keycode_;
+            }
+        }
+    }
+}
+
+EXTRA_CLEANUP() {
+    rtapi_print_msg(RTAPI_MSG_ERR, "Cleanup\n");
+    ioctl(fd, UI_DEV_DESTROY);
+    close(fd);
+}
