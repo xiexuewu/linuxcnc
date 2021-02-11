@@ -49,6 +49,7 @@ each key""";
 pin in bit init "set this pin TRUE once all the events have been set";
 
 license "GPL-2.0+";
+author "andypugh";
 
 ;;
 
